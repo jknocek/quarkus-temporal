@@ -4,7 +4,6 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
-import java.util.Random;
 import java.util.function.Supplier;
 
 import jakarta.inject.Singleton;
@@ -18,6 +17,7 @@ import io.grpc.netty.shaded.io.netty.util.internal.logging.InternalLoggerFactory
 import io.quarkiverse.temporal.graal.nettyhandling.BossEventLoopGroup;
 import io.quarkiverse.temporal.graal.nettyhandling.MainEventLoopGroup;
 import io.quarkiverse.temporal.graal.nettyhandling.runtime.EmptyByteBufStub;
+import io.quarkiverse.temporal.graal.nettyhandling.runtime.MachineIdGenerator;
 import io.quarkiverse.temporal.graal.nettyhandling.runtime.NettyRecorder;
 import io.quarkus.arc.deployment.AdditionalBeanBuildItem;
 import io.quarkus.arc.deployment.SyntheticBeanBuildItem;
@@ -26,11 +26,13 @@ import io.quarkus.deployment.annotations.BuildProducer;
 import io.quarkus.deployment.annotations.BuildStep;
 import io.quarkus.deployment.annotations.ExecutionTime;
 import io.quarkus.deployment.annotations.Record;
+import io.quarkus.deployment.builditem.GeneratedRuntimeSystemPropertyBuildItem;
 import io.quarkus.deployment.builditem.SystemPropertyBuildItem;
 import io.quarkus.deployment.builditem.nativeimage.NativeImageConfigBuildItem;
 import io.quarkus.deployment.builditem.nativeimage.NativeImageResourceBuildItem;
 import io.quarkus.deployment.builditem.nativeimage.NativeImageSystemPropertyBuildItem;
 import io.quarkus.deployment.builditem.nativeimage.ReflectiveClassBuildItem;
+import io.quarkus.deployment.builditem.nativeimage.ReflectiveMethodBuildItem;
 import io.quarkus.deployment.builditem.nativeimage.RuntimeInitializedClassBuildItem;
 import io.quarkus.deployment.builditem.nativeimage.UnsafeAccessedFieldBuildItem;
 import io.quarkus.deployment.logging.LogCleanupFilterBuildItem;
@@ -63,24 +65,37 @@ class NettyProcessor {
     }
 
     @BuildStep
-    public SystemPropertyBuildItem setNettyMachineId() {
+    public GeneratedRuntimeSystemPropertyBuildItem setNettyMachineId() {
         // we set the io.grpc.netty.shaded.io.netty.machineId system property so to prevent potential
         // slowness when generating/inferring the default machine id in io.grpc.netty.shaded.io.netty.channel.DefaultChannelId
         // implementation, which iterates over the NetworkInterfaces to determine the "best" machine id
+        return new GeneratedRuntimeSystemPropertyBuildItem("io.grpc.netty.shaded.io.netty.machineId", MachineIdGenerator.class);
+    }
 
-        // borrowed from io.grpc.netty.shaded.io.netty.util.internal.MacAddressUtil.EUI64_MAC_ADDRESS_LENGTH
-        final int EUI64_MAC_ADDRESS_LENGTH = 8;
-        final byte[] machineIdBytes = new byte[EUI64_MAC_ADDRESS_LENGTH];
-        new Random().nextBytes(machineIdBytes);
-        final String nettyMachineId = io.grpc.netty.shaded.io.netty.util.internal.MacAddressUtil.formatAddress(machineIdBytes);
-        return new SystemPropertyBuildItem("io.grpc.netty.shaded.io.netty.machineId", nettyMachineId);
+    @BuildStep
+    public SystemPropertyBuildItem disableFinalizers() {
+        return new SystemPropertyBuildItem(
+                "io.grpc.netty.shaded.io.netty.allocator.disableCacheFinalizersForFastThreadLocalThreads", "true");
     }
 
     @BuildStep
     NativeImageConfigBuildItem build(
             NettyBuildTimeConfig config,
             BuildProducer<ReflectiveClassBuildItem> reflectiveClass,
+            BuildProducer<ReflectiveMethodBuildItem> reflectiveMethods,
             List<MinNettyAllocatorMaxOrderBuildItem> minMaxOrderBuildItems) {
+
+        reflectiveMethods.produce(
+                new ReflectiveMethodBuildItem("Reflectively accessed through PlatformDependent0's static initializer",
+                        "jdk.internal.misc.Unsafe", "getUnsafe", new String[0]));
+        // in JDK >= 21 the constructor has `long, long` signature
+        reflectiveMethods.produce(
+                new ReflectiveMethodBuildItem("Reflectively accessed through PlatformDependent0's static initializer",
+                        "java.nio.DirectByteBuffer", "<init>", new String[] { long.class.getName(), long.class.getName() }));
+        // in JDK < 21 the constructor has `long, int` signature
+        reflectiveMethods.produce(
+                new ReflectiveMethodBuildItem("Reflectively accessed through PlatformDependent0's static initializer",
+                        "java.nio.DirectByteBuffer", "<init>", new String[] { long.class.getName(), int.class.getName() }));
 
         reflectiveClass
                 .produce(ReflectiveClassBuildItem.builder("io.grpc.netty.shaded.io.netty.channel.socket.nio.NioSocketChannel")
@@ -232,7 +247,11 @@ class NettyProcessor {
                 // - io.grpc.netty.shaded.io.netty.tryUnsafe
                 // - org.jboss.netty.tryUnsafe
                 // - io.grpc.netty.shaded.io.netty.tryReflectionSetAccessible
-                .addRuntimeReinitializedClass("io.grpc.netty.shaded.io.netty.util.internal.PlatformDependent0");
+                .addRuntimeReinitializedClass("io.grpc.netty.shaded.io.netty.util.internal.PlatformDependent0")
+                // Runtime initialize classes to allow netty to use the field offset for testing if unsafe is available or not
+                // See https://github.com/quarkusio/quarkus/issues/47903#issuecomment-2890924970
+                .addRuntimeReinitializedClass("io.grpc.netty.shaded.io.netty.util.AbstractReferenceCounted")
+                .addRuntimeReinitializedClass("io.grpc.netty.shaded.io.netty.buffer.AbstractReferenceCountedByteBuf");
 
         if (QuarkusClassLoader.isClassPresentAtRuntime("io.grpc.netty.shaded.io.netty.buffer.UnpooledByteBufAllocator")) {
             // Runtime initialize due to the use of the io.grpc.netty.shaded.io.netty.util.internal.PlatformDependent class
