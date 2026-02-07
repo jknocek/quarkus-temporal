@@ -79,7 +79,7 @@ delete_method() {
         # Subtract 1 from start_line to include any annotation that comes before
         start_line=$((start_line - 1))
         # Use sed to delete the lines from the file
-        sed -i '' "${start_line},${end_line}d" "$file"
+        sed -i "${start_line},${end_line}d" "$file"
         echo "Deleted method/class '$method' from $file (Lines: $start_line - $end_line)"
     else
         echo "Method/Class '$method' not found in $file"
