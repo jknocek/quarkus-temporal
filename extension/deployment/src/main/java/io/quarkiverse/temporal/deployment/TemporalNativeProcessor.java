@@ -16,6 +16,7 @@ import io.quarkus.deployment.builditem.IndexDependencyBuildItem;
 import io.quarkus.deployment.builditem.nativeimage.NativeImageConfigBuildItem;
 import io.quarkus.deployment.builditem.nativeimage.NativeImageProxyDefinitionBuildItem;
 import io.quarkus.deployment.builditem.nativeimage.ReflectiveClassBuildItem;
+import io.quarkus.deployment.builditem.nativeimage.RuntimeInitializedPackageBuildItem;
 import io.quarkus.deployment.pkg.NativeConfig;
 import io.temporal.activity.ActivityInterface;
 import io.temporal.client.ActivityCompletionClient;
@@ -44,7 +45,8 @@ public class TemporalNativeProcessor {
 
     @BuildStep(onlyIf = IsNativeBuild.class)
     void configureNetty(BuildProducer<ReflectiveClassBuildItem> reflectiveClass,
-            BuildProducer<NativeImageConfigBuildItem> nativeImageConfig) {
+            BuildProducer<NativeImageConfigBuildItem> nativeImageConfig,
+            BuildProducer<RuntimeInitializedPackageBuildItem> runtimeInitializedPackage) {
         reflectiveClass.produce(ReflectiveClassBuildItem
                 .builder(NettyChannelProvider.class)
                 .methods()
@@ -54,6 +56,12 @@ public class TemporalNativeProcessor {
         nativeImageConfig.produce(NativeImageConfigBuildItem.builder()
                 .addRuntimeInitializedClass("io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts")
                 .build());
+
+        // TODO may be able to remove this when using a Quarkus 25 compatible build
+        // Jansi's Kernel32 and its inner classes are Windows-only JNI bindings that fail
+        // at build time on Linux. Deferring the entire package to runtime avoids whack-a-mole
+        // with each inner class (CONSOLE_SCREEN_BUFFER_INFO, SMALL_RECT, COORD, etc.).
+        runtimeInitializedPackage.produce(new RuntimeInitializedPackageBuildItem("org.fusesource.jansi.internal"));
     }
 
     @BuildStep(onlyIf = IsNativeBuild.class)
